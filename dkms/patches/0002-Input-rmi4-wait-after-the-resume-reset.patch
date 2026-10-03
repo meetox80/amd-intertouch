@@ -1,0 +1,32 @@
+From: kotwicha
+Subject: [PATCH] Input: rmi4 - wait after the resume reset
+
+psmouse switches off the PS/2 interface of an InterTouch device before
+the SMBus side resumes, and a Synaptics sensor restarts from its
+firmware defaults when that happens. rmi_smb_resume() programs it again
+immediately. Some sensors, the TM3471 in AMD ThinkPads among them, have
+been seen to report badly until their next reset after that: frames
+come at an uneven rate, or the first frame of each touch is out of
+date.
+
+Sleep 300 ms between re-entering SMBus mode and rmi_reset().
+---
+diff --git a/drivers/input/rmi4/rmi_smbus.c b/drivers/input/rmi4/rmi_smbus.c
+--- a/drivers/input/rmi4/rmi_smbus.c
++++ b/drivers/input/rmi4/rmi_smbus.c
+@@ -21,6 +21,7 @@
+ #define SMB_MAX_COUNT			32
+ #define RMI_SMB2_MAP_SIZE		8 /* 8 entry of 4 bytes each */
+ #define RMI_SMB2_MAP_FLAGS_WE		0x01
++#define RMI_SMB_RESET_GRACE_MS		300
+ 
+ struct mapping_table_entry {
+ 	__le16 rmiaddr;
+@@ -384,6 +385,7 @@ static int rmi_smb_resume(struct device *dev)
+ 	int ret;
+ 
+ 	rmi_smb_reset(&rmi_smb->xport, 0);
++	msleep(RMI_SMB_RESET_GRACE_MS);
+ 
+ 	rmi_reset(rmi_dev);
+ 

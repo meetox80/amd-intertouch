@@ -1,0 +1,55 @@
+From: kotwicha
+Subject: [PATCH] Input: synaptics - 60 ms doze for some Lenovo pads
+
+For twelve Lenovo pad IDs, the INF of Lenovo's Windows touchpad driver
+overrides the F01 doze interval with 6, i.e. 60 ms. Linux keeps the
+firmware value, with which these sensors doze right after lift-off.
+Over RMI4 that drops quick taps and can swap the contacts in the first
+two-finger frame, which libinput turns into a pinch.
+
+Set the same doze interval through rmi_device_platform_data so rmi_f01
+applies it whenever the sensor is configured.
+---
+diff --git a/drivers/input/mouse/synaptics.c b/drivers/input/mouse/synaptics.c
+--- a/drivers/input/mouse/synaptics.c
++++ b/drivers/input/mouse/synaptics.c
+@@ -1781,6 +1781,29 @@ static int synaptics_intertouch = IS_ENABLED(CONFIG_RMI4_SMB) ?
+ module_param_named(synaptics_intertouch, synaptics_intertouch, int, 0644);
+ MODULE_PARM_DESC(synaptics_intertouch, "Use a secondary bus for the Synaptics device.");
+ 
++static const char * const lenovo_doze_pnp_ids[] = {
++	"LEN040D",
++	"LEN040E",
++	"LEN040F",
++	"LEN0410",
++	"LEN0411",
++	"LEN0417",
++	"LEN0418",
++	"LEN2064",
++	"LEN2073",
++	"LEN2149",
++	"LEN2161",
++	"LEN2162",
++	NULL
++};
++
++static u8 synaptics_doze(struct psmouse *psmouse)
++{
++	if (psmouse_matches_pnp_id(psmouse, lenovo_doze_pnp_ids))
++		return 6;
++	return 0;
++}
++
+ static int synaptics_create_intertouch(struct psmouse *psmouse,
+ 				       struct synaptics_device_info *info,
+ 				       bool leave_breadcrumbs)
+@@ -1790,6 +1813,9 @@ static int synaptics_create_intertouch(struct psmouse *psmouse,
+ 		!SYN_CAP_EXT_BUTTONS_STICK(info->ext_cap_10);
+ 	const struct rmi_device_platform_data pdata = {
+ 		.reset_delay_ms = 30,
++		.power_management = {
++			.doze_interval = synaptics_doze(psmouse),
++		},
+ 		.sensor_pdata = {
+ 			.sensor_type = rmi_sensor_touchpad,
+ 			.axis_align.flip_y = true,

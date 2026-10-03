@@ -1,0 +1,790 @@
+From: kotwicha
+Subject: [PATCH] i2c: piix4: listen for Host Notify on the SMB0001 port
+
+rmi_smbus only binds on adapters that advertise
+I2C_FUNC_SMBUS_HOST_NOTIFY. On AMD ThinkPads the touchpad sits on the
+second SMBus port of the FCH, where i2c-piix4 never offered it, so
+psmouse keeps the pad on PS/2.
+
+That port is backed by an ASF controller which can also be addressed
+as a target. Firmware publishes it as an SMB0001 node whose _CRS gives
+the port range and an interrupt. When that range starts at the aux
+adapter's base, and no AMDI001A node hands the controller to
+i2c-amd-asf-plat, the aux adapter now runs it in two modes.
+
+Between transfers the controller is a target listening on address
+0x08. Its interrupt is registered with the level, active-low mode from
+_CRS rather than the ISA default. A threaded handler empties the two
+receive banks and fires the notify domain IRQ of every device that
+sent a Host Notify; banks that never empty get the target reset.
+
+Each transfer switches it to host mode and back. Bit 7 of the bank
+control register is set in host mode so block reads come from the
+host FIFO instead of a receive bank, and since every finished host
+transaction also asserts the interrupt, the hard handler acks it.
+
+The pad may begin a notification while the host addresses it.
+piix4_transaction() now returns -EAGAIN on a bus collision, and the aux
+adapter retries those, as well as NAKs from a device that turns out to
+be notifying, after listening for 1 ms, at most three times.
+
+Listening stops across system sleep, and the controller's registers go
+back to their boot values on remove and shutdown.
+i2c_piix4.host_notify=0 turns all of this off.
+---
+diff --git a/drivers/i2c/busses/i2c-piix4.c b/drivers/i2c/busses/i2c-piix4.c
+--- a/drivers/i2c/busses/i2c-piix4.c
++++ b/drivers/i2c/busses/i2c-piix4.c
+@@ -34,6 +34,10 @@
+ #include <linux/dmi.h>
+ #include <linux/acpi.h>
+ #include <linux/io.h>
++#include <linux/bitmap.h>
++#include <linux/interrupt.h>
++#include <linux/mutex.h>
++#include <linux/spinlock.h>
+ #include <linux/platform_data/x86/amd-fch.h>
+ 
+ #include "i2c-piix4.h"
+@@ -105,6 +109,10 @@ MODULE_PARM_DESC(force_addr,
+ 		 "Forcibly enable the PIIX4 at the given address. "
+ 		 "EXTREMELY DANGEROUS!");
+ 
++static bool host_notify = true;
++module_param(host_notify, bool, 0444);
++MODULE_PARM_DESC(host_notify, "Use the SMB0001 ASF port for SMBus Host Notify (default: on)");
++
+ static int srvrworks_csb5_delay;
+ static struct pci_driver piix4_driver;
+ 
+@@ -566,18 +574,18 @@ int piix4_transaction(struct i2c_adapter *piix4_adapter, unsigned short piix4_sm
+ 		dev_err(&piix4_adapter->dev, "Error: Failed bus transaction\n");
+ 	}
+ 
++	if (temp & 0x04) {
++		result = -ENXIO;
++		dev_dbg(&piix4_adapter->dev, "Error: no response!\n");
++	}
++
+ 	if (temp & 0x08) {
+-		result = -EIO;
++		result = -EAGAIN;
+ 		dev_dbg(&piix4_adapter->dev, "Bus collision! SMBus may be "
+ 			"locked until next hard reset. (sorry!)\n");
+ 		/* Clock stops and target is stuck in mid-transmission */
+ 	}
+ 
+-	if (temp & 0x04) {
+-		result = -ENXIO;
+-		dev_dbg(&piix4_adapter->dev, "Error: no response!\n");
+-	}
+-
+ 	if (inb_p(SMBHSTSTS) != 0x00)
+ 		outb_p(inb(SMBHSTSTS), SMBHSTSTS);
+ 
+@@ -880,6 +888,651 @@ static const struct i2c_algorithm piix4_smbus_algorithm_sb800 = {
+ 	.functionality	= piix4_func,
+ };
+ 
++#ifdef CONFIG_ACPI
++
++#define ASF_WINDOW		0x20
++
++#define ASF_DATA		0x07
++#define ASF_LISTEN_ADDR		0x09
++#define ASF_STATUS		0x0a
++#define ASF_TGT_STATUS		0x0d
++#define ASF_DATA_LEN		0x11
++#define ASF_DATA_PTR		0x12
++#define ASF_BANK_CTL		0x13
++#define ASF_TGT_CTL		0x15
++
++#define ASF_LISTEN_EN		BIT(0)
++#define ASF_TGT_IRQ		BIT(1)
++#define ASF_TGT_RESET		BIT(4)
++#define ASF_TGT_ERRORS		GENMASK(3, 1)
++#define ASF_STATUS_TGT		BIT(6)
++#define ASF_BANK0_FULL		BIT(2)
++#define ASF_BANK1_FULL		BIT(3)
++#define ASF_BANKS_FULL		(ASF_BANK0_FULL | ASF_BANK1_FULL)
++#define ASF_BANK_PICK		BIT(4)
++#define ASF_BANK_FIFO		BIT(7)
++#define ASF_HOST_DONE		BIT(1)
++#define ASF_HOST_PEC		BIT(5)
++#define ASF_HOST_DATA		BIT(7)
++
++#define ASF_PM_REG		(FCH_PM_DECODEEN + 0x02)
++#define ASF_PM_HOST		BIT(0)
++#define ASF_PM_CLK		BIT(1)
++
++#define ASF_SMBUS_HOST		0x08
++#define ASF_BANK_SIZE		72
++#define ASF_NADDR		128
++#define ASF_ROUNDS		8
++#define ASF_REDO		3
++#define ASF_GAP_US		1000
++
++enum {
++	ASF_ON,
++	ASF_HIT,
++};
++
++struct asf_fw {
++	unsigned short base;
++	unsigned short len;
++	u32 gsi;
++	u8 trig;
++	u8 pol;
++	bool shared;
++	bool wired;
++};
++
++struct asf_ctx {
++	struct device *dev;
++	struct i2c_adapter *adap;
++	struct sb800_mmio_cfg pm;
++	unsigned long flags;
++	unsigned short base;
++	u32 gsi;
++	int irq;
++	bool hooked;
++	bool active;
++	bool keep;
++	bool was_on;
++	struct {
++		u8 pm;
++		u8 listen;
++		u8 tgt;
++		u8 bank;
++	} saved;
++};
++
++static struct asf_ctx asf;
++static DEFINE_MUTEX(asf_lock);
++static DEFINE_RAW_SPINLOCK(asf_tgt_lock);
++
++static u8 asf_rd(u8 reg)
++{
++	return inb_p(asf.base + reg);
++}
++
++static void asf_wr(u8 reg, u8 val)
++{
++	outb_p(val, asf.base + reg);
++}
++
++static void asf_rmw(u8 reg, u8 clear, u8 set)
++{
++	asf_wr(reg, (asf_rd(reg) & ~clear) | set);
++}
++
++static void asf_tgt(u8 clear, u8 set)
++{
++	guard(raw_spinlock_irqsave)(&asf_tgt_lock);
++	asf_rmw(ASF_TGT_CTL, clear, set);
++}
++
++static void asf_bank(u8 clear, u8 set)
++{
++	asf_rmw(ASF_BANK_CTL, clear | ASF_BANKS_FULL, set);
++}
++
++static void asf_pm(u8 clear, u8 set)
++{
++	void __iomem *reg = asf.pm.addr + ASF_PM_REG;
++
++	iowrite8((ioread8(reg) & ~clear) | set, reg);
++}
++
++static void asf_wipe(void)
++{
++	asf_wr(ASF_TGT_STATUS, 0);
++	asf_wr(ASF_STATUS, 0);
++	asf_wr(ASF_STATUS, ASF_STATUS_TGT);
++}
++
++static bool asf_ack(void)
++{
++	u8 sta = asf_rd(ASF_STATUS);
++
++	if (!(sta & ASF_STATUS_TGT))
++		return false;
++	asf_wr(ASF_STATUS, sta);
++	return true;
++}
++
++static void asf_host(void)
++{
++	asf_rmw(ASF_LISTEN_ADDR, ASF_LISTEN_EN, 0);
++	asf_tgt(ASF_TGT_IRQ, 0);
++	asf_tgt(0, ASF_TGT_RESET);
++	asf_wr(ASF_TGT_STATUS, 0);
++	asf_pm(0, ASF_PM_HOST);
++	asf_bank(0, ASF_BANK_FIFO);
++}
++
++static void asf_target(void)
++{
++	unsigned short piix4_smba = asf.base;
++
++	set_bit(ASF_ON, &asf.flags);
++	outb_p(0, SMBHSTSTS);
++	asf_wipe();
++	asf_bank(ASF_BANK_FIFO, 0);
++	asf_wr(ASF_LISTEN_ADDR, ASF_SMBUS_HOST << 1 | ASF_LISTEN_EN);
++	asf_pm(ASF_PM_HOST, 0);
++	asf_pm(0, ASF_PM_CLK);
++	outb_p(inb_p(SMBHSTCNT) | ASF_HOST_DATA | ASF_HOST_PEC, SMBHSTCNT);
++	asf_tgt(ASF_TGT_RESET, 0);
++	asf_tgt(0, ASF_TGT_IRQ);
++}
++
++static void asf_park(void)
++{
++	asf.keep = false;
++	asf_rmw(ASF_LISTEN_ADDR, ASF_LISTEN_EN, 0);
++	asf_tgt(ASF_TGT_IRQ, 0);
++	asf_tgt(0, ASF_TGT_RESET);
++	asf_wipe();
++	clear_bit(ASF_ON, &asf.flags);
++	if (asf.hooked)
++		synchronize_hardirq(asf.irq);
++	clear_bit(ASF_HIT, &asf.flags);
++}
++
++static void asf_revert(void)
++{
++	asf_tgt(0xff, asf.saved.tgt | ASF_TGT_RESET);
++	asf_wr(ASF_LISTEN_ADDR, asf.saved.listen);
++	asf_wr(ASF_BANK_CTL, asf.saved.bank & ~ASF_BANKS_FULL);
++	asf_wipe();
++	asf_tgt(0xff, asf.saved.tgt);
++	asf_pm(ASF_PM_HOST | ASF_PM_CLK, asf.saved.pm);
++}
++
++static bool asf_take(unsigned long *seen, bool hit, int turn)
++{
++	u8 buf[ASF_BANK_SIZE];
++	u8 ctl, cmd, len, addr, i;
++	bool high;
++
++	if (asf_rd(ASF_TGT_STATUS) & ASF_TGT_ERRORS) {
++		asf_wr(ASF_BANK_CTL, asf_rd(ASF_BANK_CTL) | ASF_BANKS_FULL);
++		asf_wr(ASF_DATA_PTR, 0);
++		return true;
++	}
++
++	ctl = asf_rd(ASF_BANK_CTL);
++	switch (ctl & ASF_BANKS_FULL) {
++	case ASF_BANKS_FULL:
++		high = turn & 1;
++		break;
++	case ASF_BANK1_FULL:
++		high = true;
++		break;
++	case ASF_BANK0_FULL:
++		high = false;
++		break;
++	default:
++		if (!hit)
++			return false;
++		high = false;
++		break;
++	}
++
++	ctl &= ~(ASF_BANKS_FULL | ASF_BANK_PICK);
++	if (high)
++		ctl |= ASF_BANK_PICK;
++	asf_wr(ASF_BANK_CTL, ctl);
++
++	cmd = asf_rd(ASF_DATA);
++	len = min_t(u8, asf_rd(ASF_DATA_LEN), ASF_BANK_SIZE);
++	for (i = 0; i < len; i++)
++		buf[i] = asf_rd(ASF_DATA);
++
++	asf_wr(ASF_BANK_CTL, ctl | (high ? ASF_BANK1_FULL : ASF_BANK0_FULL));
++	asf_wr(ASF_DATA_PTR, 0);
++	dev_dbg(asf.dev, "ASF: bank %d cmd 0x%02x: %*ph\n", high, cmd, len, buf);
++
++	if (cmd != ASF_SMBUS_HOST << 1 || len < 3 || buf[0] & 1)
++		return true;
++	addr = buf[0] >> 1;
++	if (addr >= 0x08 && addr <= 0x77)
++		__set_bit(addr, seen);
++	return true;
++}
++
++static bool asf_collect(unsigned long *seen)
++{
++	int turn;
++
++	for (turn = 0; turn < ASF_ROUNDS; turn++) {
++		bool hit = asf_ack();
++
++		if (test_and_clear_bit(ASF_HIT, &asf.flags))
++			hit = true;
++		if (!hit && !(asf_rd(ASF_BANK_CTL) & ASF_BANKS_FULL))
++			return false;
++		if (!asf_take(seen, hit, turn))
++			return false;
++	}
++	return asf_rd(ASF_BANK_CTL) & ASF_BANKS_FULL;
++}
++
++static void asf_hush(unsigned long *seen)
++{
++	asf_rmw(ASF_LISTEN_ADDR, ASF_LISTEN_EN, 0);
++	asf_tgt(ASF_TGT_IRQ, 0);
++	synchronize_hardirq(asf.irq);
++	asf_collect(seen);
++}
++
++static void asf_notify(const unsigned long *seen)
++{
++	unsigned int addr;
++
++	if (!asf.adap)
++		return;
++	for_each_set_bit(addr, seen, ASF_NADDR) {
++		dev_dbg(&asf.adap->dev, "ASF: notify from 0x%02x\n", addr);
++		i2c_handle_smbus_host_notify(asf.adap, addr);
++	}
++}
++
++static irqreturn_t asf_hard(int irq, void *cookie)
++{
++	unsigned short piix4_smba = asf.base;
++
++	if (!asf_ack()) {
++		if (!(inb_p(SMBHSTSTS) & ASF_HOST_DONE))
++			return IRQ_NONE;
++		outb_p(ASF_HOST_DONE, SMBHSTSTS);
++		return IRQ_HANDLED;
++	}
++	scoped_guard(raw_spinlock_irqsave, &asf_tgt_lock) {
++		if (!test_bit(ASF_ON, &asf.flags)) {
++			asf_rmw(ASF_TGT_CTL, ASF_TGT_IRQ, 0);
++			return IRQ_HANDLED;
++		}
++	}
++	set_bit(ASF_HIT, &asf.flags);
++	return IRQ_WAKE_THREAD;
++}
++
++static void asf_kick(unsigned long *seen)
++{
++	asf_rmw(ASF_LISTEN_ADDR, ASF_LISTEN_EN, 0);
++	if (piix4_sb800_region_request(asf.dev, &asf.pm)) {
++		clear_bit(ASF_ON, &asf.flags);
++		dev_warn_ratelimited(asf.dev,
++				     "ASF: PM block busy, target idle until the next transfer\n");
++		return;
++	}
++	dev_dbg(asf.dev, "ASF: banks stuck full, target reset\n");
++	asf_collect(seen);
++	asf_tgt(0, ASF_TGT_RESET);
++	asf_wr(ASF_TGT_STATUS, 0);
++	asf_target();
++	piix4_sb800_region_release(asf.dev, &asf.pm);
++}
++
++static irqreturn_t asf_soft(int irq, void *cookie)
++{
++	DECLARE_BITMAP(seen, ASF_NADDR) = {};
++
++	guard(mutex)(&asf_lock);
++
++	if (!test_bit(ASF_ON, &asf.flags))
++		return IRQ_HANDLED;
++	if (asf_collect(seen))
++		asf_kick(seen);
++	asf_notify(seen);
++	return IRQ_HANDLED;
++}
++
++static bool asf_gap(s32 ret, u16 addr, unsigned long *seen)
++{
++	DECLARE_BITMAP(fresh, ASF_NADDR) = {};
++
++	asf_target();
++	usleep_range(ASF_GAP_US, 2 * ASF_GAP_US);
++	asf_hush(fresh);
++	bitmap_or(seen, seen, fresh, ASF_NADDR);
++	return ret == -EAGAIN || (addr < ASF_NADDR && test_bit(addr, fresh));
++}
++
++static s32 asf_xfer(struct i2c_adapter *adap, u16 addr, unsigned short flags,
++		    char read_write, u8 command, int size,
++		    union i2c_smbus_data *data)
++{
++	DECLARE_BITMAP(seen, ASF_NADDR) = {};
++	int tries = 0;
++	s32 ret;
++
++	guard(mutex)(&asf_lock);
++
++	if (!asf.active)
++		return piix4_access(adap, addr, flags, read_write, command,
++				    size, data);
++
++	ret = piix4_sb800_region_request(&adap->dev, &asf.pm);
++	if (ret)
++		return ret;
++
++	if (test_bit(ASF_ON, &asf.flags))
++		asf_hush(seen);
++
++	for (;;) {
++		asf_host();
++		ret = piix4_access(adap, addr, flags, read_write, command,
++				   size, data);
++		if ((ret != -EAGAIN && ret != -ENXIO) || !asf.keep ||
++		    tries++ == ASF_REDO || !asf_gap(ret, addr, seen))
++			break;
++		dev_dbg(&adap->dev, "ASF: 0x%02x busy (%d), try %d\n",
++			addr, ret, tries + 1);
++	}
++
++	if (ret < 0 && tries)
++		dev_dbg(&adap->dev, "ASF: 0x%02x still failing (%d)\n", addr, ret);
++	if (asf.keep)
++		asf_target();
++	piix4_sb800_region_release(&adap->dev, &asf.pm);
++	asf_notify(seen);
++	return ret;
++}
++
++static u32 asf_caps(struct i2c_adapter *adap)
++{
++	return piix4_func(adap) | I2C_FUNC_SMBUS_HOST_NOTIFY;
++}
++
++static const struct i2c_algorithm asf_i2c = {
++	.smbus_xfer	= asf_xfer,
++	.functionality	= asf_caps,
++};
++
++static const struct i2c_algorithm *asf_ops(unsigned short base)
++{
++	return asf.active && asf.base == base ? &asf_i2c : NULL;
++}
++
++static void asf_line(struct asf_fw *fw, u32 gsi, u8 trig, u8 pol, u8 share)
++{
++	fw->gsi = gsi;
++	fw->trig = trig;
++	fw->pol = pol;
++	fw->shared = share == ACPI_SHARED;
++	fw->wired = true;
++}
++
++static void asf_span(struct asf_fw *fw, u64 start, u64 len)
++{
++	if (!fw->len && start == fw->base)
++		fw->len = min_t(u64, len, USHRT_MAX);
++}
++
++static acpi_status asf_res(struct acpi_resource *res, void *ctx)
++{
++	struct acpi_resource_extended_irq *ext = &res->data.extended_irq;
++	struct acpi_resource_irq *irq = &res->data.irq;
++	struct acpi_resource_address64 win;
++	struct asf_fw *fw = ctx;
++
++	switch (res->type) {
++	case ACPI_RESOURCE_TYPE_IO:
++		asf_span(fw, res->data.io.minimum, res->data.io.address_length);
++		break;
++	case ACPI_RESOURCE_TYPE_FIXED_IO:
++		asf_span(fw, res->data.fixed_io.address,
++			 res->data.fixed_io.address_length);
++		break;
++	case ACPI_RESOURCE_TYPE_ADDRESS16:
++	case ACPI_RESOURCE_TYPE_ADDRESS32:
++	case ACPI_RESOURCE_TYPE_ADDRESS64:
++		if (ACPI_SUCCESS(acpi_resource_to_address64(res, &win)) &&
++		    win.resource_type == ACPI_IO_RANGE)
++			asf_span(fw, win.address.minimum,
++				 win.address.address_length);
++		break;
++	case ACPI_RESOURCE_TYPE_IRQ:
++		if (!fw->wired && irq->interrupt_count)
++			asf_line(fw, irq->interrupts[0], irq->triggering,
++				 irq->polarity, irq->shareable);
++		break;
++	case ACPI_RESOURCE_TYPE_EXTENDED_IRQ:
++		if (!fw->wired && ext->interrupt_count)
++			asf_line(fw, ext->interrupts[0], ext->triggering,
++				 ext->polarity, ext->shareable);
++		break;
++	}
++	return AE_OK;
++}
++
++static acpi_status asf_dev(acpi_handle handle, u32 depth, void *ctx,
++			   void **out)
++{
++	struct asf_fw *fw = ctx;
++	struct asf_fw cand = { .base = fw->base };
++	acpi_status status;
++
++	status = acpi_walk_resources(handle, METHOD_NAME__CRS, asf_res, &cand);
++	if (ACPI_FAILURE(status) || !cand.len)
++		return AE_OK;
++	*fw = cand;
++	return AE_CTRL_TERMINATE;
++}
++
++static void asf_claim(struct pci_dev *pdev, const struct asf_fw *fw)
++{
++	struct device *dev = &pdev->dev;
++	unsigned short extra = fw->base + SMBIOSIZE;
++	unsigned short size = ASF_WINDOW - SMBIOSIZE;
++	int irq, ret;
++
++	if (!fw->wired) {
++		dev_warn(dev, "ASF Host Notify off: SMB0001 has no interrupt\n");
++		return;
++	}
++	dev_info(dev, "SMB0001 port 0x%04x+%u, GSI %u %s-triggered active-%s\n",
++		 fw->base, fw->len, fw->gsi,
++		 fw->trig == ACPI_LEVEL_SENSITIVE ? "level" : "edge",
++		 fw->pol == ACPI_ACTIVE_LOW ? "low" : "high");
++	if (fw->len < ASF_WINDOW) {
++		dev_warn(dev, "ASF Host Notify off: SMB0001 window is only %u bytes\n",
++			 fw->len);
++		return;
++	}
++	if (!piix4_sb800_use_mmio(pdev)) {
++		dev_warn(dev, "ASF Host Notify off: FCH PM MMIO unavailable\n");
++		return;
++	}
++	if (acpi_check_region(extra, size, piix4_driver.name) ||
++	    !request_region(extra, size, "smb0001")) {
++		dev_warn(dev, "ASF Host Notify off: ports 0x%x-0x%x busy\n",
++			 extra, extra + size - 1);
++		return;
++	}
++
++	irq = acpi_register_gsi(dev, fw->gsi, fw->trig, fw->pol);
++	if (irq < 0) {
++		dev_warn(dev, "ASF Host Notify off: GSI %u rejected its _CRS mode (%d)\n",
++			 fw->gsi, irq);
++		goto release;
++	}
++
++	asf.dev = dev;
++	asf.base = fw->base;
++	asf.gsi = fw->gsi;
++	asf.irq = irq;
++	asf.pm.use_mmio = true;
++
++	ret = piix4_sb800_region_request(dev, &asf.pm);
++	if (ret)
++		goto unregister;
++	asf.saved.pm = ioread8(asf.pm.addr + ASF_PM_REG) &
++		       (ASF_PM_HOST | ASF_PM_CLK);
++	asf.saved.listen = asf_rd(ASF_LISTEN_ADDR);
++	asf.saved.tgt = asf_rd(ASF_TGT_CTL);
++	asf.saved.bank = asf_rd(ASF_BANK_CTL);
++	asf_host();
++	piix4_sb800_region_release(dev, &asf.pm);
++
++	ret = request_threaded_irq(irq, asf_hard, asf_soft,
++				   IRQF_ONESHOT | (fw->shared ? IRQF_SHARED : 0),
++				   "smb0001", &asf);
++	if (ret) {
++		dev_warn(dev, "ASF Host Notify off: IRQ %d unavailable (%d)\n",
++			 irq, ret);
++		goto revert;
++	}
++
++	asf.hooked = true;
++	asf.active = true;
++	dev_info(dev, "ASF Host Notify on, IRQ %d\n", irq);
++	return;
++
++revert:
++	if (!piix4_sb800_region_request(dev, &asf.pm)) {
++		asf_revert();
++		piix4_sb800_region_release(dev, &asf.pm);
++	}
++unregister:
++	acpi_unregister_gsi(fw->gsi);
++release:
++	release_region(extra, size);
++	asf = (struct asf_ctx){};
++}
++
++static void asf_setup(struct pci_dev *pdev, unsigned short base)
++{
++	struct asf_fw fw = { .base = base };
++
++	if (!host_notify)
++		return;
++	if (acpi_dev_present("AMDI001A", NULL, -1)) {
++		dev_dbg(&pdev->dev, "ASF: AMDI001A owns the port\n");
++		return;
++	}
++	acpi_get_devices(ACPI_SMBUS_MS_HID, asf_dev, &fw, NULL);
++	if (!fw.len) {
++		dev_dbg(&pdev->dev, "ASF: no SMB0001 port at 0x%04x\n", base);
++		return;
++	}
++	asf_claim(pdev, &fw);
++}
++
++static void asf_open(struct i2c_adapter *adap)
++{
++	guard(mutex)(&asf_lock);
++
++	if (!asf.active)
++		return;
++	asf.adap = adap;
++	asf.keep = true;
++	if (piix4_sb800_region_request(asf.dev, &asf.pm)) {
++		dev_warn(asf.dev, "ASF: PM block busy, listening starts with the first transfer\n");
++		return;
++	}
++	asf_target();
++	piix4_sb800_region_release(asf.dev, &asf.pm);
++}
++
++static void asf_close(void)
++{
++	scoped_guard(mutex, &asf_lock) {
++		if (!asf.active)
++			return;
++		asf_park();
++		asf.adap = NULL;
++		if (!piix4_sb800_region_request(asf.dev, &asf.pm)) {
++			asf_host();
++			piix4_sb800_region_release(asf.dev, &asf.pm);
++		}
++	}
++	if (asf.hooked) {
++		free_irq(asf.irq, &asf);
++		asf.hooked = false;
++	}
++}
++
++static void asf_teardown(void)
++{
++	asf_close();
++
++	guard(mutex)(&asf_lock);
++
++	if (asf.active) {
++		if (!piix4_sb800_region_request(asf.dev, &asf.pm)) {
++			asf_revert();
++			piix4_sb800_region_release(asf.dev, &asf.pm);
++		} else {
++			dev_warn(asf.dev, "ASF: PM block busy, registers not reverted\n");
++		}
++		acpi_unregister_gsi(asf.gsi);
++		release_region(asf.base + SMBIOSIZE, ASF_WINDOW - SMBIOSIZE);
++	}
++	asf = (struct asf_ctx){};
++}
++
++static int asf_sleep(struct device *dev)
++{
++	guard(mutex)(&asf_lock);
++
++	asf.was_on = asf.keep;
++	if (asf.keep)
++		asf_park();
++	return 0;
++}
++
++static int asf_wake(struct device *dev)
++{
++	guard(mutex)(&asf_lock);
++
++	if (!asf.active || !asf.was_on)
++		return 0;
++	asf.keep = true;
++	if (piix4_sb800_region_request(asf.dev, &asf.pm)) {
++		dev_warn(asf.dev, "ASF: PM block busy after resume, listening starts with the first transfer\n");
++		return 0;
++	}
++	asf_tgt(0, ASF_TGT_RESET);
++	asf_wr(ASF_TGT_STATUS, 0);
++	asf_target();
++	piix4_sb800_region_release(asf.dev, &asf.pm);
++	return 0;
++}
++
++#else
++
++static void asf_setup(struct pci_dev *pdev, unsigned short base) {}
++static void asf_open(struct i2c_adapter *adap) {}
++static void asf_close(void) {}
++static void asf_teardown(void) {}
++static int asf_sleep(struct device *dev) { return 0; }
++static int asf_wake(struct device *dev) { return 0; }
++
++static const struct i2c_algorithm *asf_ops(unsigned short base)
++{
++	return NULL;
++}
++
++#endif
++
+ static const struct pci_device_id piix4_ids[] = {
+ 	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82371AB_3) },
+ 	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82443MX_3) },
+@@ -928,7 +1581,7 @@ static int piix4_add_adapter(struct pci_dev *dev, unsigned short smba,
+ 	adap->owner = THIS_MODULE;
+ 	adap->class = I2C_CLASS_HWMON;
+ 	adap->algo = sb800_main ? &piix4_smbus_algorithm_sb800
+-				: &smbus_algorithm;
++				: asf_ops(smba) ?: &smbus_algorithm;
+ 
+ 	adapdata = kzalloc_obj(*adapdata);
+ 	if (adapdata == NULL) {
+@@ -1103,11 +1756,16 @@ static int piix4_probe(struct pci_dev *dev, const struct pci_device_id *id)
+ 	}
+ 
+ 	if (retval > 0) {
++		asf_setup(dev, retval);
+ 		/* Try to add the aux adapter if it exists,
+ 		 * piix4_add_adapter will clean up if this fails */
+ 		piix4_add_adapter(dev, retval, false, 0, false, 1,
+ 				  is_sb800 ? piix4_aux_port_name_sb800 : "",
+ 				  &piix4_aux_adapter);
++		if (!piix4_aux_adapter)
++			asf_teardown();
++		else
++			asf_open(piix4_aux_adapter);
+ 	}
+ 
+ 	return 0;
+@@ -1138,16 +1796,27 @@ static void piix4_remove(struct pci_dev *dev)
+ 	}
+ 
+ 	if (piix4_aux_adapter) {
++		asf_close();
+ 		piix4_adap_remove(piix4_aux_adapter);
+ 		piix4_aux_adapter = NULL;
++		asf_teardown();
+ 	}
+ }
+ 
++static void piix4_halt(struct pci_dev *dev)
++{
++	asf_teardown();
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(piix4_pm, asf_sleep, asf_wake);
++
+ static struct pci_driver piix4_driver = {
+ 	.name		= "piix4_smbus",
+ 	.id_table	= piix4_ids,
+ 	.probe		= piix4_probe,
+ 	.remove		= piix4_remove,
++	.shutdown	= piix4_halt,
++	.driver.pm	= pm_sleep_ptr(&piix4_pm),
+ };
+ 
+ module_pci_driver(piix4_driver);

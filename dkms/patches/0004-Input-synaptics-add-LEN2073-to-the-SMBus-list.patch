@@ -1,0 +1,19 @@
+From: kotwicha
+Subject: [PATCH] Input: synaptics - add LEN2073 to the SMBus list
+
+LEN2073 is the TM3471 touchpad of the ThinkPad T14 Gen 2a and P14s
+Gen 2 AMD. With i2c-piix4 providing Host Notify on the FCH aux port it
+works over RMI4/SMBus, so list it and let psmouse choose InterTouch
+without a module parameter.
+---
+diff --git a/drivers/input/mouse/synaptics.c b/drivers/input/mouse/synaptics.c
+--- a/drivers/input/mouse/synaptics.c
++++ b/drivers/input/mouse/synaptics.c
+@@ -192,6 +192,7 @@ static const char * const smbus_pnp_ids[] = {
+ 	"LEN2055", /* E580 */
+ 	"LEN2058", /* E490 */
+ 	"LEN2068", /* T14 Gen 1 */
++	"LEN2073",
+ 	"SYN1221", /* TUXEDO InfinityBook Pro 14 v5 */
+ 	"SYN3003", /* HP EliteBook 850 G1 */
+ 	"SYN3015", /* HP EliteBook 840 G2 */

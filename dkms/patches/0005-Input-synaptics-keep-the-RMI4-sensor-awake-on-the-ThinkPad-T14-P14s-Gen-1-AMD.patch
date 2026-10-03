@@ -1,0 +1,57 @@
+From: kotwicha
+Subject: [PATCH] Input: synaptics - keep the RMI4 sensor awake on the ThinkPad T14/P14s Gen 1 AMD
+
+On the Synaptics TM3471 in the ThinkPad T14/P14s Gen 1 AMD (LEN2064)
+driven over RMI4/SMBus, the doze interval of 6 that Lenovo's Windows
+driver programs is not enough: two-finger scrolls are still reported
+as pinches. Setting the F01 NoSleep bit removes the misfires.
+
+Restore LEN2064 to smbus_pnp_ids, now that i2c-piix4 provides SMBus
+Host Notify through the ASF target block, and add
+psmouse.synaptics_rmi_nosleep (-1 = known pads, 0 = never, 1 = always)
+so other pads can opt in without a rebuild.
+---
+diff --git a/drivers/input/mouse/synaptics.c b/drivers/input/mouse/synaptics.c
+--- a/drivers/input/mouse/synaptics.c
++++ b/drivers/input/mouse/synaptics.c
+@@ -191,6 +191,7 @@ static const char * const smbus_pnp_ids[] = {
+ 	"LEN2054", /* E480 */
+ 	"LEN2055", /* E580 */
+ 	"LEN2058", /* E490 */
++	"LEN2064",
+ 	"LEN2068", /* T14 Gen 1 */
+ 	"LEN2073",
+ 	"SYN1221", /* TUXEDO InfinityBook Pro 14 v5 */
+@@ -1782,6 +1783,23 @@ static int synaptics_intertouch = IS_ENABLED(CONFIG_RMI4_SMB) ?
+ module_param_named(synaptics_intertouch, synaptics_intertouch, int, 0644);
+ MODULE_PARM_DESC(synaptics_intertouch, "Use a secondary bus for the Synaptics device.");
+ 
++static const char * const rmi_nosleep_pnp_ids[] = {
++	"LEN2064",
++	NULL
++};
++
++static int synaptics_rmi_nosleep = -1;
++module_param_named(synaptics_rmi_nosleep, synaptics_rmi_nosleep, int, 0644);
++MODULE_PARM_DESC(synaptics_rmi_nosleep, "Keep the RMI4 sensor awake between touches (-1 = known pads, 0 = never, 1 = always).");
++
++static bool synaptics_rmi_keep_awake(struct psmouse *psmouse)
++{
++	if (synaptics_rmi_nosleep >= 0)
++		return synaptics_rmi_nosleep;
++
++	return psmouse_matches_pnp_id(psmouse, rmi_nosleep_pnp_ids);
++}
++
+ static const char * const lenovo_doze_pnp_ids[] = {
+ 	"LEN040D",
+ 	"LEN040E",
+@@ -1816,6 +1834,8 @@ static int synaptics_create_intertouch(struct psmouse *psmouse,
+ 		.reset_delay_ms = 30,
+ 		.power_management = {
+ 			.doze_interval = synaptics_doze(psmouse),
++			.nosleep = synaptics_rmi_keep_awake(psmouse) ?
++					RMI_REG_STATE_ON : RMI_REG_STATE_DEFAULT,
+ 		},
+ 		.sensor_pdata = {
+ 			.sensor_type = rmi_sensor_touchpad,

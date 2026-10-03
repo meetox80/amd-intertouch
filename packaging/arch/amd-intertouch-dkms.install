@@ -1,0 +1,11 @@
+post_install() {
+  echo ":: Reboot to switch the touchpad to RMI4/SMBus, then run: amd-intertouch status"
+}
+
+post_upgrade() {
+  echo ":: Reboot to load the updated modules, then run: amd-intertouch status"
+}
+
+post_remove() {
+  echo ":: Reboot to return to the stock modules."
+}
