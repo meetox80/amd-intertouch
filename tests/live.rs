@@ -124,6 +124,24 @@ fn success() {
 }
 
 #[test]
+fn replaces() {
+    let f = p14s_ps2();
+    f.file(
+        "/proc/bus/input/devices",
+        &format!("{KEYBOARD}\n{RMI4_POINTERS}\n"),
+    );
+    let runner = FakeRunner::new().on_query(
+        "dkms status",
+        Output::success("amd-intertouch/0.1.0, k, x86_64: installed\n"),
+    );
+    let r = run(&f, &runner, &["try"]);
+    assert_eq!(r.code, 0, "{}\n{}", r.out, r.err);
+    assert!(r.out.ends_with(
+        "this build is loaded until reboot: `sudo amd-intertouch install` replaces the installed one with it, `sudo amd-intertouch restore` or a reboot goes back\n"
+    ));
+}
+
+#[test]
 fn cached() {
     let f = p14s_ps2();
     let dir = live::build_dir(KERNEL);

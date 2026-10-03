@@ -15,7 +15,7 @@ fn installed() {
          i2c_piix4    patched build installed and loaded\n\
          rmi_smbus    patched build installed and loaded\n\
          psmouse      patched build installed and loaded\n\
-         dkms         amd-intertouch 0.1.0: installed on 7.2.7-arch1-1, installed on 7.2.7-hardened1-1-hardened\n\
+         dkms         amd-intertouch 0.1.1: installed on 7.2.7-arch1-1, installed on 7.2.7-hardened1-1-hardened\n\
          nosleep      auto (on for known pads: LEN2064)\n\
          trackpoint   serio4: rate 200, sensitivity 200\n"
     );

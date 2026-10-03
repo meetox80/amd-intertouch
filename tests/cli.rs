@@ -24,7 +24,7 @@ fn help() {
     let r = run(&f, &FakeRunner::new(), &[]);
     assert_eq!(r.out, help);
     let r = run(&f, &FakeRunner::new(), &["-V"]);
-    assert_eq!(r.out, "amd-intertouch 0.1.0\nmade by kotwicha!\n");
+    assert_eq!(r.out, "amd-intertouch 0.1.1\nmade by kotwicha!\n");
 }
 
 #[test]
@@ -74,7 +74,7 @@ fn credit() {
     let colored = amd_intertouch::output::Style { color: true }.credit();
     assert_eq!(
         String::from_utf8(out).unwrap(),
-        format!("amd-intertouch 0.1.0\n{colored}\n")
+        format!("amd-intertouch 0.1.1\n{colored}\n")
     );
     let mut out = Vec::new();
     amd_intertouch::app::run_with(

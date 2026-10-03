@@ -1,6 +1,6 @@
 pkgname=amd-intertouch-dkms
 _name=amd-intertouch
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="Synaptics InterTouch (RMI4 over SMBus) on AMD ThinkPads: patched i2c-piix4, rmi_smbus and psmouse via DKMS, with the amd-intertouch CLI"
 arch=('x86_64')

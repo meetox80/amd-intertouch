@@ -212,10 +212,17 @@ fn cmd_try(sys: &Sys, runner: &dyn Runner, ex: &Executor, out: &mut dyn Write) -
     writeln!(out)?;
     match report_transport(sys, out)? {
         Transport::Rmi4(_) => {
-            writeln!(
-                out,
-                "nothing is installed yet: `sudo {NAME} install` keeps it, `sudo {NAME} restore` or a reboot undoes it"
-            )?;
+            if install::dkms_entries(runner).iter().any(|e| e.name == NAME) {
+                writeln!(
+                    out,
+                    "this build is loaded until reboot: `sudo {NAME} install` replaces the installed one with it, `sudo {NAME} restore` or a reboot goes back"
+                )?;
+            } else {
+                writeln!(
+                    out,
+                    "nothing is installed yet: `sudo {NAME} install` keeps it, `sudo {NAME} restore` or a reboot undoes it"
+                )?;
+            }
             Ok(exit::OK)
         }
         _ => {

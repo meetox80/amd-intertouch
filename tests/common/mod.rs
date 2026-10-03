@@ -342,8 +342,8 @@ pub fn installed_runner() -> FakeRunner {
         .on_query(
             "dkms status",
             Output::success(&format!(
-                "amd-intertouch/0.1.0, {KERNEL2}, x86_64: installed\n\
-                 amd-intertouch/0.1.0, {KERNEL}, x86_64: installed\n\
+                "amd-intertouch/0.1.1, {KERNEL2}, x86_64: installed\n\
+                 amd-intertouch/0.1.1, {KERNEL}, x86_64: installed\n\
                  vboxhost/7.2.20_OSE, {KERNEL}, x86_64: installed\n"
             )),
         )

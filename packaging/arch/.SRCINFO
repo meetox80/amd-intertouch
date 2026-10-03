@@ -1,6 +1,6 @@
 pkgbase = amd-intertouch-dkms
 	pkgdesc = Synaptics InterTouch (RMI4 over SMBus) on AMD ThinkPads: patched i2c-piix4, rmi_smbus and psmouse via DKMS, with the amd-intertouch CLI
-	pkgver = 0.1.0
+	pkgver = 0.1.1
 	pkgrel = 1
 	url = https://github.com/meetox80/amd-intertouch
 	install = amd-intertouch-dkms.install
@@ -13,7 +13,7 @@ pkgbase = amd-intertouch-dkms
 	depends = glibc
 	provides = amd-intertouch
 	conflicts = thinkpad-t14-amd-touchpad-dkms
-	source = amd-intertouch-0.1.0.tar.gz::https://github.com/meetox80/amd-intertouch/archive/refs/tags/v0.1.0.tar.gz
+	source = amd-intertouch-0.1.1.tar.gz::https://github.com/meetox80/amd-intertouch/archive/refs/tags/v0.1.1.tar.gz
 	sha256sums = SKIP
 
 pkgname = amd-intertouch-dkms

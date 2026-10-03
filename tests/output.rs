@@ -112,13 +112,13 @@ fn broken_output() {
             f.file("/usr/lib/modprobe.d/amd-intertouch.conf", "x");
             let runner = FakeRunner::new().on_query(
                 "dkms status",
-                Output::success("amd-intertouch/0.0.9: added\namd-intertouch/0.1.0: added\n"),
+                Output::success("amd-intertouch/0.0.9: added\namd-intertouch/0.1.1: added\n"),
             );
             (f, runner, vec!["install"])
         }),
         ("install-nothing", || {
             let f = p14s_ps2();
-            f.file("/usr/src/amd-intertouch-0.1.0/dkms.conf", "pkg")
+            f.file("/usr/src/amd-intertouch-0.1.1/dkms.conf", "pkg")
                 .file("/usr/bin/pacman", "")
                 .file("/usr/lib/modprobe.d/amd-intertouch.conf", "x");
             let runner = FakeRunner::new().on_query("pacman -Qqo", Output::success("pkg\n"));
