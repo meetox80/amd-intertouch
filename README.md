@@ -1,7 +1,5 @@
 # amd-intertouch
 
-[![ci](https://github.com/meetox80/amd-intertouch/actions/workflows/ci.yml/badge.svg)](https://github.com/meetox80/amd-intertouch/actions/workflows/ci.yml)
-
 Synaptics InterTouch (RMI4 over SMBus) for touchpads on AMD-based ThinkPads.
 
 On these systems the Linux kernel falls back to the PS/2 protocol for the touchpad. `amd-intertouch` provides patched builds of `i2c-piix4`, `rmi_smbus` and `psmouse`, installed through DKMS, that switch the touchpad to RMI4 over SMBus, the transport used by the Windows driver.
