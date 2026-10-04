@@ -38,17 +38,24 @@ Requirements:
 
 ### Arch Linux
 
+Install the headers for your kernel (`linux-headers`, `linux-lts-headers`, `linux-zen-headers` or `linux-hardened-headers`), then build the package:
+
 ```sh
-paru -S amd-intertouch-dkms
+sudo pacman -S --needed base-devel git
+git clone https://github.com/meetox80/amd-intertouch
+cd amd-intertouch/packaging/arch
+makepkg -si
 ```
 
-Reboot, then verify with `amd-intertouch status`. DKMS rebuilds the modules on kernel updates. The package conflicts with `thinkpad-t14-amd-touchpad-dkms`.
+Reboot, then verify with `amd-intertouch status`. DKMS rebuilds the modules on kernel updates. To update, run `git pull` and `makepkg -si` again in the same directory. The package conflicts with `thinkpad-t14-amd-touchpad-dkms`.
 
 ### Other distributions
 
-Requires `dkms`, kernel headers, `make`, `gcc`, `patch` and a Rust toolchain.
+Requires `git`, `dkms`, kernel headers, `make`, `gcc`, `patch` and a Rust toolchain.
 
 ```sh
+git clone https://github.com/meetox80/amd-intertouch
+cd amd-intertouch
 cargo build --release
 ./target/release/amd-intertouch check
 sudo ./target/release/amd-intertouch try
