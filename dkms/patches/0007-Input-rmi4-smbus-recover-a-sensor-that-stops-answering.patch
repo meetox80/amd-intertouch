@@ -1,0 +1,191 @@
+From: kotwicha
+Subject: [PATCH] Input: rmi4 - smbus: recover a sensor that stops answering
+
+The TM3471 in AMD ThinkPads now and then NAKs the read of its interrupt
+status that follows a Host Notify. Usually the next notification gets
+through and only the touch in flight is lost. At least once the sensor
+never answered again: no more notifications, every transfer failed with
+-ENXIO, and the failing suspend callback aborted every attempt to sleep
+until psmouse was reloaded.
+
+Check the sensor 100 ms after a failed transfer. If it still returns
+its SMBus version, raise its Host Notify interrupt so the missed
+attention gets serviced. If it does not, or three transfers in a row
+have failed, ask psmouse to recreate the device through
+psmouse_smbus_lost(). The symbol is looked up at run time, so
+rmi_smbus does not depend on psmouse. Recovery runs at most once every
+10 s, and the check sits on a freezable workqueue so it never runs in
+the middle of system sleep.
+
+rmi_smb_suspend() no longer fails system suspend: the interrupt is
+disabled either way, and resume resets the sensor.
+---
+diff --git a/drivers/input/rmi4/rmi_smbus.c b/drivers/input/rmi4/rmi_smbus.c
+--- a/drivers/input/rmi4/rmi_smbus.c
++++ b/drivers/input/rmi4/rmi_smbus.c
+@@ -6,15 +6,18 @@
+  */
+ 
+ #include <linux/kernel.h>
++#include <linux/atomic.h>
+ #include <linux/delay.h>
+ #include <linux/i2c.h>
+ #include <linux/interrupt.h>
++#include <linux/jiffies.h>
+ #include <linux/kconfig.h>
+ #include <linux/lockdep.h>
+ #include <linux/module.h>
+ #include <linux/pm.h>
+ #include <linux/rmi.h>
+ #include <linux/slab.h>
++#include <linux/workqueue.h>
+ #include "rmi_driver.h"
+ 
+ #define SMB_PROTOCOL_VERSION_ADDRESS	0xfd
+@@ -22,6 +25,11 @@
+ #define RMI_SMB2_MAP_SIZE		8 /* 8 entry of 4 bytes each */
+ #define RMI_SMB2_MAP_FLAGS_WE		0x01
+ #define RMI_SMB_RESET_GRACE_MS		300
++#define RMI_SMB_CHECK_MS		100
++#define RMI_SMB_FAILS			3
++#define RMI_SMB_RESCUE_GAP		(10 * HZ)
++
++void psmouse_smbus_lost(struct i2c_client *client);
+ 
+ struct mapping_table_entry {
+ 	__le16 rmiaddr;
+@@ -38,8 +46,13 @@ struct rmi_smb_xport {
+ 	u8 table_index;
+ 	struct mutex mappingtable_mutex;
+ 	struct mapping_table_entry mapping_table[RMI_SMB2_MAP_SIZE];
++
++	struct delayed_work check;
++	atomic_t fails;
+ };
+ 
++static u64 rmi_smb_rescued;
++
+ static int rmi_smb_get_version(struct rmi_smb_xport *rmi_smb)
+ {
+ 	struct i2c_client *client = rmi_smb->client;
+@@ -55,6 +68,60 @@ static int rmi_smb_get_version(struct rmi_smb_xport *rmi_smb)
+ 	return retval + 1;
+ }
+ 
++static int rmi_smb_note(struct rmi_smb_xport *rmi_smb, int retval)
++{
++	if (retval >= 0) {
++		atomic_set(&rmi_smb->fails, 0);
++		return retval;
++	}
++
++	atomic_inc(&rmi_smb->fails);
++	queue_delayed_work(system_freezable_wq, &rmi_smb->check,
++			   msecs_to_jiffies(RMI_SMB_CHECK_MS));
++	return retval;
++}
++
++static void rmi_smb_rescue(struct rmi_smb_xport *rmi_smb)
++{
++	struct i2c_client *client = rmi_smb->client;
++	void (*lost)(struct i2c_client *client);
++	u64 now = get_jiffies_64();
++
++	if (rmi_smb_rescued &&
++	    time_before64(now, rmi_smb_rescued + RMI_SMB_RESCUE_GAP)) {
++		queue_delayed_work(system_freezable_wq, &rmi_smb->check,
++				   rmi_smb_rescued + RMI_SMB_RESCUE_GAP - now);
++		return;
++	}
++
++	lost = symbol_get(psmouse_smbus_lost);
++	if (!lost) {
++		dev_err(&client->dev,
++			"sensor stopped answering and psmouse is not loaded\n");
++		return;
++	}
++
++	dev_warn(&client->dev, "sensor stopped answering, resetting it over PS/2\n");
++	rmi_smb_rescued = now;
++	lost(client);
++	symbol_put(psmouse_smbus_lost);
++}
++
++static void rmi_smb_check(struct work_struct *work)
++{
++	struct rmi_smb_xport *rmi_smb =
++		container_of(to_delayed_work(work), struct rmi_smb_xport, check);
++	struct i2c_client *client = rmi_smb->client;
++
++	if (atomic_read(&rmi_smb->fails) < RMI_SMB_FAILS &&
++	    rmi_smb_get_version(rmi_smb) >= 0) {
++		i2c_handle_smbus_host_notify(client->adapter, client->addr);
++		return;
++	}
++
++	rmi_smb_rescue(rmi_smb);
++}
++
+ /* SMB block write - wrapper over ic2_smb_write_block */
+ static int smb_block_write(struct rmi_transport_dev *xport,
+ 			      u8 commandcode, const void *buf, size_t len)
+@@ -168,7 +235,7 @@ static int rmi_smb_write_block(struct rmi_transport_dev *xport, u16 rmiaddr,
+ 	}
+ exit:
+ 	mutex_unlock(&rmi_smb->page_mutex);
+-	return retval;
++	return rmi_smb_note(rmi_smb, retval);
+ }
+ 
+ /* SMB block read - wrapper over ic2_smb_read_block */
+@@ -223,7 +290,7 @@ static int rmi_smb_read_block(struct rmi_transport_dev *xport, u16 rmiaddr,
+ 
+ exit:
+ 	mutex_unlock(&rmi_smb->page_mutex);
+-	return retval;
++	return rmi_smb_note(rmi_smb, retval);
+ }
+ 
+ static void rmi_smb_clear_state(struct rmi_smb_xport *rmi_smb)
+@@ -276,7 +343,7 @@ static int rmi_smb_reset(struct rmi_transport_dev *xport, u16 reset_addr)
+ 	 * ensure that a psmouse_reset is called before initializing the
+ 	 * device and after it has been removed to be in a known state.
+ 	 */
+-	return rmi_smb_enable_smbus_mode(rmi_smb);
++	return rmi_smb_note(rmi_smb, rmi_smb_enable_smbus_mode(rmi_smb));
+ }
+ 
+ static const struct rmi_transport_ops rmi_smb_ops = {
+@@ -320,6 +387,7 @@ static int rmi_smb_probe(struct i2c_client *client)
+ 	rmi_smb->client = client;
+ 	mutex_init(&rmi_smb->page_mutex);
+ 	mutex_init(&rmi_smb->mappingtable_mutex);
++	INIT_DELAYED_WORK(&rmi_smb->check, rmi_smb_check);
+ 
+ 	rmi_smb->xport.dev = &client->dev;
+ 	rmi_smb->xport.pdata = *pdata;
+@@ -337,6 +405,7 @@ static int rmi_smb_probe(struct i2c_client *client)
+ 
+ 	error = rmi_register_transport_device(&rmi_smb->xport);
+ 	if (error) {
++		disable_delayed_work_sync(&rmi_smb->check);
+ 		dev_err(&client->dev, "failed to register sensor: %d\n", error);
+ 		return error;
+ 	}
+@@ -348,6 +417,7 @@ static void rmi_smb_remove(struct i2c_client *client)
+ {
+ 	struct rmi_smb_xport *rmi_smb = i2c_get_clientdata(client);
+ 
++	disable_delayed_work_sync(&rmi_smb->check);
+ 	rmi_unregister_transport_device(&rmi_smb->xport);
+ }
+ 
+@@ -361,7 +431,7 @@ static int rmi_smb_suspend(struct device *dev)
+ 	if (ret)
+ 		dev_warn(dev, "Failed to suspend device: %d\n", ret);
+ 
+-	return ret;
++	return 0;
+ }
+ 
+ static int rmi_smb_runtime_suspend(struct device *dev)

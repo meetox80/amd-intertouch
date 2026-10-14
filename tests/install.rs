@@ -21,24 +21,24 @@ fn plan() {
     assert_eq!(out[0], "dry run: nothing will be changed");
     assert_eq!(
         out[1],
-        "  remove  /usr/src/amd-intertouch-0.1.1  (recursive)"
+        "  remove  /usr/src/amd-intertouch-0.1.2  (recursive)"
     );
     let writes: Vec<&&str> = out
         .iter()
-        .filter(|l| l.starts_with("  write   /usr/src/amd-intertouch-0.1.1/"))
+        .filter(|l| l.starts_with("  write   /usr/src/amd-intertouch-0.1.2/"))
         .collect();
     assert_eq!(writes.len(), ASSETS.len());
     let tail: Vec<&str> = out[2 + ASSETS.len()..].to_vec();
     assert_eq!(
         tail,
         vec![
-            "  run     dkms add -m amd-intertouch -v 0.1.1",
-            "  run     dkms install -m amd-intertouch -v 0.1.1 -k 7.2.7-arch1-1",
-            "  run     dkms install -m amd-intertouch -v 0.1.1 -k 7.2.7-hardened1-1-hardened",
+            "  run     dkms add -m amd-intertouch -v 0.1.2",
+            "  run     dkms install -m amd-intertouch -v 0.1.2 -k 7.2.7-arch1-1",
+            "  run     dkms install -m amd-intertouch -v 0.1.2 -k 7.2.7-hardened1-1-hardened",
             "  write   /etc/modprobe.d/amd-intertouch.conf  (73 bytes, mode 644)",
             "  on failure:",
-            "    run     dkms remove -m amd-intertouch -v 0.1.1 --all  (failure ignored)",
-            "    remove  /usr/src/amd-intertouch-0.1.1  (recursive)",
+            "    run     dkms remove -m amd-intertouch -v 0.1.2 --all  (failure ignored)",
+            "    remove  /usr/src/amd-intertouch-0.1.2  (recursive)",
             "    remove  /etc/modprobe.d/amd-intertouch.conf",
         ]
     );
@@ -122,15 +122,15 @@ fn real() {
     assert_eq!(r.code, 0, "{}", r.err);
     for a in ASSETS {
         assert_eq!(
-            std::fs::read(f.path(&format!("/usr/src/amd-intertouch-0.1.1/{}", a.path))).unwrap(),
+            std::fs::read(f.path(&format!("/usr/src/amd-intertouch-0.1.2/{}", a.path))).unwrap(),
             a.data
         );
     }
     assert_eq!(
-        f.mode("/usr/src/amd-intertouch-0.1.1/tools/pre-build.sh"),
+        f.mode("/usr/src/amd-intertouch-0.1.2/tools/pre-build.sh"),
         0o755
     );
-    assert_eq!(f.mode("/usr/src/amd-intertouch-0.1.1/dkms.conf"), 0o644);
+    assert_eq!(f.mode("/usr/src/amd-intertouch-0.1.2/dkms.conf"), 0o644);
     assert_eq!(
         f.read("/etc/modprobe.d/amd-intertouch.conf"),
         "softdep i2c_piix4 post: rmi_smbus\noptions psmouse synaptics_intertouch=1\n"
@@ -142,9 +142,9 @@ fn real() {
     assert_eq!(
         runner.execs(),
         vec![
-            "dkms add -m amd-intertouch -v 0.1.1",
-            "dkms install -m amd-intertouch -v 0.1.1 -k 7.2.7-arch1-1",
-            "dkms install -m amd-intertouch -v 0.1.1 -k 7.2.7-hardened1-1-hardened",
+            "dkms add -m amd-intertouch -v 0.1.2",
+            "dkms install -m amd-intertouch -v 0.1.2 -k 7.2.7-arch1-1",
+            "dkms install -m amd-intertouch -v 0.1.2 -k 7.2.7-hardened1-1-hardened",
         ]
     );
     assert!(
@@ -156,10 +156,10 @@ fn real() {
 #[test]
 fn stale_files() {
     let (f, runner) = fresh();
-    f.file("/usr/src/amd-intertouch-0.1.1/stale.c", "old");
+    f.file("/usr/src/amd-intertouch-0.1.2/stale.c", "old");
     run(&f, &runner, &["install"]);
-    assert!(!f.exists("/usr/src/amd-intertouch-0.1.1/stale.c"));
-    assert!(f.exists("/usr/src/amd-intertouch-0.1.1/dkms.conf"));
+    assert!(!f.exists("/usr/src/amd-intertouch-0.1.2/stale.c"));
+    assert!(f.exists("/usr/src/amd-intertouch-0.1.2/dkms.conf"));
 }
 
 #[test]
@@ -168,17 +168,17 @@ fn reinstall() {
     let runner = FakeRunner::new().on_query(
         "dkms status",
         Output::success(&format!(
-            "amd-intertouch/0.1.1, {KERNEL}, x86_64: installed\n"
+            "amd-intertouch/0.1.2, {KERNEL}, x86_64: installed\n"
         )),
     );
     let r = run(&f, &runner, &["install"]);
     assert_eq!(r.code, 0);
-    assert!(r.out.starts_with("reinstalling amd-intertouch 0.1.1\n"));
+    assert!(r.out.starts_with("reinstalling amd-intertouch 0.1.2\n"));
     assert_eq!(
         runner.execs()[0],
-        "dkms remove -m amd-intertouch -v 0.1.1 --all"
+        "dkms remove -m amd-intertouch -v 0.1.2 --all"
     );
-    assert_eq!(runner.execs()[1], "dkms add -m amd-intertouch -v 0.1.1");
+    assert_eq!(runner.execs()[1], "dkms add -m amd-intertouch -v 0.1.2");
 }
 
 #[test]
@@ -212,22 +212,22 @@ fn upgrade() {
 #[test]
 fn packaged() {
     let (f, _) = fresh();
-    f.file("/usr/src/amd-intertouch-0.1.1/dkms.conf", "pkg")
+    f.file("/usr/src/amd-intertouch-0.1.2/dkms.conf", "pkg")
         .file("/usr/bin/pacman", "");
     let runner = FakeRunner::new()
         .on_query("dkms status", Output::success(""))
         .on_query(
-            "pacman -Qqo /usr/src/amd-intertouch-0.1.1/dkms.conf",
+            "pacman -Qqo /usr/src/amd-intertouch-0.1.2/dkms.conf",
             Output::success("amd-intertouch-dkms\n"),
         );
     let r = run(&f, &runner, &["install", "--nosleep", "off"]);
     assert_eq!(r.code, 0, "{}", r.err);
     assert!(
         r.out
-            .starts_with("amd-intertouch 0.1.1 is managed by the package `amd-intertouch-dkms`")
+            .starts_with("amd-intertouch 0.1.2 is managed by the package `amd-intertouch-dkms`")
     );
     assert!(runner.execs().is_empty());
-    assert_eq!(f.read("/usr/src/amd-intertouch-0.1.1/dkms.conf"), "pkg");
+    assert_eq!(f.read("/usr/src/amd-intertouch-0.1.2/dkms.conf"), "pkg");
     assert!(f.exists("/etc/modprobe.d/amd-intertouch.conf"));
     assert!(f.exists("/etc/modprobe.d/amd-intertouch-nosleep.conf"));
 }
@@ -235,7 +235,7 @@ fn packaged() {
 #[test]
 fn packaged_noop() {
     let (f, _) = fresh();
-    f.file("/usr/src/amd-intertouch-0.1.1/dkms.conf", "pkg")
+    f.file("/usr/src/amd-intertouch-0.1.2/dkms.conf", "pkg")
         .file("/usr/bin/pacman", "")
         .file("/usr/lib/modprobe.d/amd-intertouch.conf", "x");
     let runner = FakeRunner::new()
@@ -263,13 +263,13 @@ fn packaged_conf() {
 #[test]
 fn dpkg_rpm() {
     let (f, _) = fresh();
-    f.file("/usr/src/amd-intertouch-0.1.1/dkms.conf", "pkg")
+    f.file("/usr/src/amd-intertouch-0.1.2/dkms.conf", "pkg")
         .file("/usr/bin/dpkg", "");
     let runner = FakeRunner::new()
         .on_query("dkms status", Output::success(""))
         .on_query(
             "dpkg -S",
-            Output::success("amd-intertouch-dkms: /usr/src/amd-intertouch-0.1.1/dkms.conf\n"),
+            Output::success("amd-intertouch-dkms: /usr/src/amd-intertouch-0.1.2/dkms.conf\n"),
         );
     let r = run(&f, &runner, &["--dry-run", "install"]);
     assert!(
@@ -315,16 +315,16 @@ fn dkms_fail() {
     let runner = FakeRunner::new()
         .on_query("dkms status", Output::success(""))
         .on_exec(
-            &format!("dkms install -m amd-intertouch -v 0.1.1 -k {KERNEL}"),
+            &format!("dkms install -m amd-intertouch -v 0.1.2 -k {KERNEL}"),
             10,
         );
     let r = run(&f, &runner, &["install"]);
     assert_eq!(r.code, 1);
     assert_eq!(
         runner.execs().last().unwrap(),
-        "dkms remove -m amd-intertouch -v 0.1.1 --all"
+        "dkms remove -m amd-intertouch -v 0.1.2 --all"
     );
-    assert!(!f.exists("/usr/src/amd-intertouch-0.1.1"));
+    assert!(!f.exists("/usr/src/amd-intertouch-0.1.2"));
     assert!(!f.exists("/etc/modprobe.d/amd-intertouch.conf"));
     assert!(r.err.contains("exited with status 10"));
 }
@@ -358,23 +358,23 @@ fn refusals() {
 #[test]
 fn uninstall() {
     let f = p14s_rmi4();
-    f.file("/usr/src/amd-intertouch-0.1.1/dkms.conf", "x")
+    f.file("/usr/src/amd-intertouch-0.1.2/dkms.conf", "x")
         .file("/etc/modprobe.d/amd-intertouch.conf", "x")
         .file("/etc/modprobe.d/amd-intertouch-nosleep.conf", "x")
         .file("/usr/local/bin/amd-intertouch", "x");
     let runner = FakeRunner::new().on_query(
         "dkms status",
         Output::success(&format!(
-            "amd-intertouch/0.1.1, {KERNEL}, x86_64: installed\n"
+            "amd-intertouch/0.1.2, {KERNEL}, x86_64: installed\n"
         )),
     );
     let r = run(&f, &runner, &["uninstall"]);
     assert_eq!(r.code, 0, "{}", r.err);
     assert_eq!(
         runner.execs(),
-        vec!["dkms remove -m amd-intertouch -v 0.1.1 --all"]
+        vec!["dkms remove -m amd-intertouch -v 0.1.2 --all"]
     );
-    assert!(!f.exists("/usr/src/amd-intertouch-0.1.1"));
+    assert!(!f.exists("/usr/src/amd-intertouch-0.1.2"));
     assert!(!f.exists("/etc/modprobe.d/amd-intertouch.conf"));
     assert!(!f.exists("/etc/modprobe.d/amd-intertouch-nosleep.conf"));
     assert!(!f.exists("/usr/local/bin/amd-intertouch"));
@@ -387,14 +387,14 @@ fn uninstall() {
 #[test]
 fn uninstall_bare() {
     let f = p14s_ps2();
-    f.file("/usr/src/amd-intertouch-0.1.1/dkms.conf", "x");
+    f.file("/usr/src/amd-intertouch-0.1.2/dkms.conf", "x");
     let runner = FakeRunner::new();
     let r = run(&f, &runner, &["--dry-run", "uninstall"]);
     assert_eq!(
         lines(&r.out),
         vec![
             "dry run: nothing will be changed",
-            "  remove  /usr/src/amd-intertouch-0.1.1  (recursive)",
+            "  remove  /usr/src/amd-intertouch-0.1.2  (recursive)",
             "  remove  /etc/modprobe.d/amd-intertouch.conf",
             "  remove  /etc/modprobe.d/amd-intertouch-nosleep.conf",
             "  remove  /usr/local/bin/amd-intertouch",
@@ -409,7 +409,7 @@ fn uninstall_bare() {
 #[test]
 fn uninstall_packaged() {
     let f = p14s_ps2();
-    f.file("/usr/src/amd-intertouch-0.1.1/dkms.conf", "x")
+    f.file("/usr/src/amd-intertouch-0.1.2/dkms.conf", "x")
         .file("/usr/bin/pacman", "");
     let runner =
         FakeRunner::new().on_query("pacman -Qqo", Output::success("amd-intertouch-dkms\n"));
@@ -417,7 +417,7 @@ fn uninstall_packaged() {
     assert_eq!(r.code, 1);
     assert_eq!(
         r.err,
-        "error: amd-intertouch 0.1.1 is installed by the package `amd-intertouch-dkms`; remove it with your package manager\n"
+        "error: amd-intertouch 0.1.2 is installed by the package `amd-intertouch-dkms`; remove it with your package manager\n"
     );
 }
 

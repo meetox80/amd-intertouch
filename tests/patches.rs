@@ -104,6 +104,12 @@ fn features() {
     assert_eq!((ids[at - 1], ids[at + 1]), ("LEN2058", "LEN2068"));
     let rmi = read(&tree, "drivers/input/rmi4/rmi_smbus.c");
     assert!(rmi.contains("msleep(RMI_SMB_RESET_GRACE_MS);"));
+    assert!(rmi.contains("lost = symbol_get(psmouse_smbus_lost);"));
+    assert!(rmi.contains("disable_delayed_work_sync(&rmi_smb->check);"));
+    let smbus = read(&tree, "drivers/input/mouse/psmouse-smbus.c");
+    assert!(smbus.contains("EXPORT_SYMBOL_GPL(psmouse_smbus_lost);"));
+    let piix4_retry = piix4.split("static s32 asf_xfer(").nth(1).unwrap();
+    assert!(!piix4_retry.contains("!asf_gap("), "NAKs must be retried");
 }
 
 #[test]
@@ -160,6 +166,9 @@ fn build() {
         }
         if ko.ends_with("i2c-piix4.ko") {
             assert!(text.contains("parm:           host_notify:"), "{text}");
+        }
+        if ko.ends_with("rmi_smbus.ko") {
+            assert!(text.contains("depends:        rmi_core\n"), "{text}");
         }
     }
 }

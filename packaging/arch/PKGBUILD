@@ -1,7 +1,7 @@
 # Maintainer: kotwicha <72318911+meetox80@users.noreply.github.com>
 pkgname=amd-intertouch-dkms
 _name=amd-intertouch
-pkgver=0.1.1
+pkgver=0.1.2
 pkgrel=1
 pkgdesc="Synaptics InterTouch (RMI4 over SMBus) on AMD ThinkPads: patched i2c-piix4, rmi_smbus and psmouse via DKMS, with the amd-intertouch CLI"
 arch=('x86_64')
@@ -14,7 +14,7 @@ provides=("$_name")
 conflicts=('thinkpad-t14-amd-touchpad-dkms')
 install=$pkgname.install
 source=("$_name-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('f52eac5cff2c56f3a4da05e826da3690a75793a2ac14b0d55a0ed3406e68530b')
+sha256sums=('SKIP')
 
 prepare() {
   cd "$_name-$pkgver"

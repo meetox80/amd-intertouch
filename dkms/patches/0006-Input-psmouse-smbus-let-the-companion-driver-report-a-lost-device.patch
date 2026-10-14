@@ -1,0 +1,104 @@
+From: kotwicha
+Subject: [PATCH] Input: psmouse-smbus - let the companion driver report a lost device
+
+An InterTouch sensor can stop answering on SMBus while its PS/2 side
+is fine. Nothing notices: the SMBus driver logs failed transfers, the
+pad goes quiet, and only reloading psmouse brings it back.
+
+Add psmouse_smbus_lost(). It removes the companion i2c client the same
+way a disconnect does; once the client is gone, the existing removal
+handler rescans the serio port, which resets the device over PS/2 and
+creates a fresh companion. A disconnect that comes in while such a
+removal is pending does not schedule a second one.
+---
+diff --git a/drivers/input/mouse/psmouse-smbus.c b/drivers/input/mouse/psmouse-smbus.c
+--- a/drivers/input/mouse/psmouse-smbus.c
++++ b/drivers/input/mouse/psmouse-smbus.c
+@@ -21,6 +21,7 @@ struct psmouse_smbus_dev {
+ 	struct list_head node;
+ 	bool dead;
+ 	bool need_deactivate;
++	bool lost;
+ };
+ 
+ static LIST_HEAD(psmouse_smbus_list);
+@@ -150,18 +151,38 @@ static void psmouse_smbus_remove_i2c_device(struct work_struct *work)
+  * attached to an adapter that is being removed. This has to be
+  * fixed in i2c core.
+  */
+-static void psmouse_smbus_schedule_remove(struct i2c_client *client)
++static bool psmouse_smbus_schedule_remove(struct i2c_client *client)
+ {
+ 	struct psmouse_smbus_removal_work *rwork;
+ 
+ 	rwork = kzalloc_obj(*rwork);
+-	if (rwork) {
+-		INIT_WORK(&rwork->work, psmouse_smbus_remove_i2c_device);
+-		rwork->client = client;
++	if (!rwork)
++		return false;
+ 
+-		queue_work(psmouse_smbus_wq, &rwork->work);
++	INIT_WORK(&rwork->work, psmouse_smbus_remove_i2c_device);
++	rwork->client = client;
++
++	queue_work(psmouse_smbus_wq, &rwork->work);
++	return true;
++}
++
++void psmouse_smbus_lost(struct i2c_client *client)
++{
++	struct psmouse_smbus_dev *smbdev;
++
++	guard(mutex)(&psmouse_smbus_mutex);
++
++	list_for_each_entry(smbdev, &psmouse_smbus_list, node) {
++		if (smbdev->client != client || smbdev->dead || smbdev->lost)
++			continue;
++
++		psmouse_dbg(smbdev->psmouse,
++			    "SMBus companion %s lost, recreating it\n",
++			    dev_name(&client->dev));
++		smbdev->lost = psmouse_smbus_schedule_remove(client);
+ 	}
+ }
++EXPORT_SYMBOL_GPL(psmouse_smbus_lost);
+ 
+ static void psmouse_smbus_disconnect(struct psmouse *psmouse)
+ {
+@@ -176,10 +197,12 @@ static void psmouse_smbus_disconnect(struct psmouse *psmouse)
+ 		smbdev->dead = true;
+ 		device_link_remove(&smbdev->client->dev,
+ 				   &psmouse->ps2dev.serio->dev);
+-		psmouse_dbg(smbdev->psmouse,
+-			    "posting removal request for SMBus companion %s\n",
+-			    dev_name(&smbdev->client->dev));
+-		psmouse_smbus_schedule_remove(smbdev->client);
++		if (!smbdev->lost) {
++			psmouse_dbg(smbdev->psmouse,
++				    "posting removal request for SMBus companion %s\n",
++				    dev_name(&smbdev->client->dev));
++			psmouse_smbus_schedule_remove(smbdev->client);
++		}
+ 	}
+ 
+ 	psmouse->private = NULL;
+diff --git a/drivers/input/mouse/psmouse.h b/drivers/input/mouse/psmouse.h
+--- a/drivers/input/mouse/psmouse.h
++++ b/drivers/input/mouse/psmouse.h
+@@ -221,6 +221,7 @@ int psmouse_smbus_module_init(void);
+ void psmouse_smbus_module_exit(void);
+ 
+ struct i2c_board_info;
++struct i2c_client;
+ 
+ int psmouse_smbus_init(struct psmouse *psmouse,
+ 		       const struct i2c_board_info *board,
+@@ -228,6 +229,7 @@ int psmouse_smbus_init(struct psmouse *psmouse,
+ 		       bool need_deactivate,
+ 		       bool leave_breadcrumbs);
+ void psmouse_smbus_cleanup(struct psmouse *psmouse);
++void psmouse_smbus_lost(struct i2c_client *client);
+ 
+ #else /* !CONFIG_MOUSE_PS2_SMBUS */
+ 

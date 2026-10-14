@@ -118,6 +118,8 @@ Writes a udev rule applied on every boot and resume, and sets the values immedia
 | `0003` | `psmouse` | Doze interval 6 on the Lenovo pads listed by the Windows driver |
 | `0004` | `psmouse` | InterTouch for `LEN2073` |
 | `0005` | `psmouse` | InterTouch and NoSleep for `LEN2064`, `synaptics_rmi_nosleep` parameter |
+| `0006` | `psmouse` | `psmouse_smbus_lost()`: recreate a companion that stopped answering |
+| `0007` | `rmi_smbus` | Recover the pad after failed transfers; a dead pad no longer blocks suspend |
 | `0101`, `0102` | `psmouse` | Backports from mainline |
 
 The pristine sources are taken from Linux 7.2.3 and patched at build time.
